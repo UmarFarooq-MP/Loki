@@ -1,0 +1,11 @@
+syntax = "proto3";
+package walpb;
+
+option go_package = "wal/pb";
+
+message Record {
+  uint64 seq = 1;
+  int64 time = 2;
+  bytes data = 3;
+  uint32 type = 4;
+}
