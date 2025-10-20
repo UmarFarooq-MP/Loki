@@ -10,11 +10,6 @@ import (
 	"time"
 )
 
-const (
-	defaultSegmentSize     = 2 * 1024 * 1024 // 2 MB for testing (increase in prod)
-	defaultSegmentDuration = 5 * time.Minute
-)
-
 type RecordType byte
 
 const (
@@ -38,25 +33,51 @@ type WalIndexEntry struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type WALInterface interface {
+	Append(rec *Record) error
+	Sync() error
+	Close() error
+}
+
+type WALConfig struct {
+	Dir             string        // e.g. "./wal_data"
+	SegmentSize     uint64        // max size in bytes before rotation
+	SegmentDuration time.Duration // max time before rotation
+	Serializer      Serializer    // pluggable serializer
+	FlushInterval   time.Duration // optional: background flush interval
+}
+
 type WAL struct {
-	dir             string
+	cfg             WALConfig
 	file            *os.File
 	writer          *bufio.Writer
 	seq             uint64
 	segmentID       int
 	segmentStartSeq uint64
 	bytesWritten    uint64
-	maxSize         uint64
 	lastRotationAt  time.Time
-	ser             BinarySerializer
 }
 
-func OpenWAL(dir string) (*WAL, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+func NewWAL(cfg WALConfig) (*WAL, error) {
+	// Apply defaults if missing
+	if cfg.Dir == "" {
+		cfg.Dir = "./wal_data"
+	}
+	if cfg.SegmentSize == 0 {
+		cfg.SegmentSize = 2 * 1024 * 1024 // 2 MB
+	}
+	if cfg.SegmentDuration == 0 {
+		cfg.SegmentDuration = 5 * time.Minute
+	}
+	if cfg.Serializer == nil {
+		cfg.Serializer = BinarySerializer{}
+	}
+
+	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
 		return nil, err
 	}
 
-	last, _ := LoadLastIndex(dir)
+	last, _ := LoadLastIndex(cfg.Dir)
 	var segID int
 	var seq uint64
 
@@ -64,26 +85,23 @@ func OpenWAL(dir string) (*WAL, error) {
 		id, _ := strconv.Atoi(strings.TrimSuffix(filepath.Base(last.File), ".wal"))
 		segID = id
 		seq = last.LastSeq
-		fmt.Printf("Resuming WAL from segment %06d (seq=%d)\n", segID, seq)
 	} else {
 		fmt.Println("Starting new WAL (no index found)")
 	}
 
-	path := filepath.Join(dir, "current.wal")
+	path := filepath.Join(cfg.Dir, "current.wal")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
 
 	w := &WAL{
-		dir:             dir,
+		cfg:             cfg,
 		file:            f,
 		writer:          bufio.NewWriterSize(f, 1<<20),
-		ser:             BinarySerializer{},
 		segmentID:       segID,
 		segmentStartSeq: seq + 1,
 		seq:             seq,
-		maxSize:         defaultSegmentSize,
 		lastRotationAt:  time.Now(),
 	}
 
@@ -96,13 +114,12 @@ func OpenWAL(dir string) (*WAL, error) {
 }
 
 func (w *WAL) Append(rec *Record) error {
-	data, err := w.ser.Encode(rec)
+	data, err := w.cfg.Serializer.Encode(rec)
 	if err != nil {
 		return err
 	}
 
 	if w.shouldRotate(len(data)) {
-		//TODO :: prefered to do it on a separate routine
 		if err := w.rotate(); err != nil {
 			return err
 		}
@@ -116,18 +133,16 @@ func (w *WAL) Append(rec *Record) error {
 	return err
 }
 
-// ---------- Rotation trigger ----------
 func (w *WAL) shouldRotate(nextSize int) bool {
-	if w.bytesWritten+uint64(nextSize) >= w.maxSize {
+	if w.bytesWritten+uint64(nextSize) >= w.cfg.SegmentSize {
 		return true
 	}
-	if time.Since(w.lastRotationAt) >= defaultSegmentDuration {
+	if time.Since(w.lastRotationAt) >= w.cfg.SegmentDuration {
 		return true
 	}
 	return false
 }
 
-// ---------- Rotate segment ----------
 func (w *WAL) rotate() error {
 	_ = w.writer.Flush()
 	_ = w.file.Sync()
@@ -135,8 +150,8 @@ func (w *WAL) rotate() error {
 
 	newID := w.segmentID + 1
 	newFile := fmt.Sprintf("%06d.wal", newID)
-	oldPath := filepath.Join(w.dir, "current.wal")
-	newPath := filepath.Join(w.dir, newFile)
+	oldPath := filepath.Join(w.cfg.Dir, "current.wal")
+	newPath := filepath.Join(w.cfg.Dir, newFile)
 
 	if err := os.Rename(oldPath, newPath); err != nil {
 		return err
@@ -148,7 +163,7 @@ func (w *WAL) rotate() error {
 		LastSeq:   w.seq,
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
-	_ = AppendIndexEntry(w.dir, entry)
+	_ = AppendIndexEntry(w.cfg.Dir, entry)
 
 	f, err := os.OpenFile(oldPath, os.O_CREATE|os.O_RDWR|os.O_APPEND|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -173,16 +188,14 @@ func (w *WAL) Sync() error {
 }
 
 func (w *WAL) Close() error {
-	//
 	_ = w.writer.Flush()
 	_ = w.file.Sync()
 	_ = w.file.Close()
 
-	// finalize current.wal into next numbered segment
 	newID := w.segmentID + 1
 	newFile := fmt.Sprintf("%06d.wal", newID)
-	oldPath := filepath.Join(w.dir, "current.wal")
-	newPath := filepath.Join(w.dir, newFile)
+	oldPath := filepath.Join(w.cfg.Dir, "current.wal")
+	newPath := filepath.Join(w.cfg.Dir, newFile)
 	if err := os.Rename(oldPath, newPath); err != nil {
 		return err
 	}
@@ -193,7 +206,7 @@ func (w *WAL) Close() error {
 		LastSeq:   w.seq,
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
-	_ = AppendIndexEntry(w.dir, entry)
+	_ = AppendIndexEntry(w.cfg.Dir, entry)
 
 	fmt.Printf("Finalized WAL → %s (seq %d–%d)\n", newFile, w.segmentStartSeq, w.seq)
 	return nil
