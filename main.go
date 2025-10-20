@@ -1,75 +1,46 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
 func main() {
-	dir := "./wal_data"
-	_ = os.MkdirAll(dir, 0o755)
-	fmt.Println("📂 WAL directory:", dir)
-
-	// --- Create WAL ---
-	w, err := OpenWAL(dir)
-	if err != nil {
-		panic(fmt.Errorf("failed to open WAL: %w", err))
+	cfg := WALConfig{
+		Dir:             "./wal_data",
+		SegmentSize:     8 * 1024 * 1024,   // 8 MB
+		SegmentDuration: 10 * time.Minute,  // rotate every 10 min
+		Serializer:      ProtoSerializer{}, // or BinarySerializer{}
+		FlushInterval:   3 * time.Second,   // auto flush every 3 sec
 	}
 
-	fmt.Println("🧾 Appending records with large payloads to trigger rotation...")
+	walInt, err := NewWALIntegration(cfg)
+	if err != nil {
+		panic(err)
+	}
+	defer walInt.Close()
 
-	for i := 1; i <= 5000; i++ {
-		// Create ~128KB payload per record to hit rotation fast
-		largePayload := strings.Repeat(fmt.Sprintf("order-%d;", i), 8192)
+	// Replay previous records since last snapshot
+	lastSnapshotSeq := uint64(5000)
+	err = walInt.ReplayFromSnapshot(lastSnapshotSeq, func(rec *Record) {
+		fmt.Printf("🔁 Replaying record #%d, type=%v\n", rec.Seq, rec.Type)
+	})
+	if err != nil {
+		panic(err)
+	}
 
+	// Example appending new records
+	for i := 1; i <= 5; i++ {
 		rec := &Record{
 			Type: RecordPlace,
 			Time: time.Now().UnixNano(),
-			Data: []byte(largePayload),
+			Data: []byte(fmt.Sprintf("order-%d", i)),
 		}
-		if err := w.Append(rec); err != nil {
-			panic(fmt.Errorf("append: %w", err))
-		}
-
-		if i%50 == 0 {
-			_ = w.Sync()
-			fmt.Printf("   ➕ appended %d records (~%.1f MB)\n", i, float64(i)*0.128)
-		}
+		_ = walInt.AppendRecord(rec)
 	}
 
-	// TODO :: look in details Sync
-	_ = w.Sync()
-	_ = w.Close()
-	fmt.Println("✅ WAL write complete and segment rotation finished")
-
-	// --- Print WAL index ---
-	index, err := LoadAllIndex(dir)
-	if err != nil {
-		panic(fmt.Errorf("read index: %w", err))
-	}
-
-	fmt.Println("\n📘 WAL Index Entries:")
-	for _, e := range index {
-		b, _ := json.MarshalIndent(e, "  ", "  ")
-		fmt.Println("  ", string(b))
-	}
-
-	// --- Simulate recovery ---
-	lastSeq := uint64(4900) // pretend snapshot covers up to seq=4900
-	fmt.Printf("\n🔁 Replaying records > seq=%d ...\n", lastSeq)
-
-	err = ReplayFrom(dir, lastSeq, func(rec *Record) {
-		fmt.Printf("  ➕ Replayed Record #%d | size=%d KB\n", rec.Seq, len(rec.Data)/1024)
-	})
-	if err != nil {
-		panic(fmt.Errorf("replay: %w", err))
-	}
-
-	fmt.Println("\n✅ Replay complete")
+	fmt.Println("🧾 Done appending records.")
 }
 
 // ReplayFrom replays all WAL entries after a given sequence number.
