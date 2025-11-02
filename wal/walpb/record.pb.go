@@ -4,7 +4,7 @@
 // 	protoc        v6.32.1
 // source: record.proto
 
-package pb
+package walpb
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -21,7 +21,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-type Record struct {
+type PBRecord struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
 	Time          int64                  `protobuf:"varint,2,opt,name=time,proto3" json:"time,omitempty"`
@@ -31,20 +31,20 @@ type Record struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Record) Reset() {
-	*x = Record{}
+func (x *PBRecord) Reset() {
+	*x = PBRecord{}
 	mi := &file_record_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Record) String() string {
+func (x *PBRecord) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Record) ProtoMessage() {}
+func (*PBRecord) ProtoMessage() {}
 
-func (x *Record) ProtoReflect() protoreflect.Message {
+func (x *PBRecord) ProtoReflect() protoreflect.Message {
 	mi := &file_record_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -56,33 +56,33 @@ func (x *Record) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Record.ProtoReflect.Descriptor instead.
-func (*Record) Descriptor() ([]byte, []int) {
+// Deprecated: Use PBRecord.ProtoReflect.Descriptor instead.
+func (*PBRecord) Descriptor() ([]byte, []int) {
 	return file_record_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *Record) GetSeq() uint64 {
+func (x *PBRecord) GetSeq() uint64 {
 	if x != nil {
 		return x.Seq
 	}
 	return 0
 }
 
-func (x *Record) GetTime() int64 {
+func (x *PBRecord) GetTime() int64 {
 	if x != nil {
 		return x.Time
 	}
 	return 0
 }
 
-func (x *Record) GetData() []byte {
+func (x *PBRecord) GetData() []byte {
 	if x != nil {
 		return x.Data
 	}
 	return nil
 }
 
-func (x *Record) GetType() uint32 {
+func (x *PBRecord) GetType() uint32 {
 	if x != nil {
 		return x.Type
 	}
@@ -93,12 +93,12 @@ var File_record_proto protoreflect.FileDescriptor
 
 const file_record_proto_rawDesc = "" +
 	"\n" +
-	"\frecord.proto\x12\x05walpb\"V\n" +
-	"\x06Record\x12\x10\n" +
+	"\frecord.proto\x12\x05walpb\"X\n" +
+	"\bPBRecord\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x12\n" +
 	"\x04time\x18\x02 \x01(\x03R\x04time\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x12\n" +
-	"\x04type\x18\x04 \x01(\rR\x04typeB\bZ\x06wal/pbb\x06proto3"
+	"\x04type\x18\x04 \x01(\rR\x04typeB\x0fZ\r./walpb;walpbb\x06proto3"
 
 var (
 	file_record_proto_rawDescOnce sync.Once
@@ -114,7 +114,7 @@ func file_record_proto_rawDescGZIP() []byte {
 
 var file_record_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
 var file_record_proto_goTypes = []any{
-	(*Record)(nil), // 0: walpb.Record
+	(*PBRecord)(nil), // 0: walpb.PBRecord
 }
 var file_record_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type

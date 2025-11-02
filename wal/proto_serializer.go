@@ -1,9 +1,8 @@
-package main
+package wal
 
 import (
 	"hash/crc32"
-
-	"wal/wal/pb"
+	"loki/wal/walpb"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -12,24 +11,20 @@ import (
 type ProtoSerializer struct{}
 
 func (ProtoSerializer) Encode(rec *Record) ([]byte, error) {
-	p := &pb.Record{
+	p := &walpb.PBRecord{
 		Seq:  rec.Seq,
 		Time: rec.Time,
 		Data: rec.Data,
 		Type: uint32(rec.Type),
 	}
-
 	body, err := proto.Marshal(p)
 	if err != nil {
 		return nil, err
 	}
-
-	// Compute checksum + length prefix for durability
 	crc := crc32.ChecksumIEEE(body)
 	header := make([]byte, 8)
 	putUint32LE(header[:4], uint32(len(body)))
 	putUint32LE(header[4:], crc)
-
 	return append(header, body...), nil
 }
 
@@ -38,25 +33,23 @@ func (ProtoSerializer) Decode(data []byte) (*Record, error) {
 		return nil, ErrCorruptRecord
 	}
 	body := data[8:]
-	wantCRC := readUint32LE(data[4:])
-	gotCRC := crc32.ChecksumIEEE(body)
-	if gotCRC != wantCRC {
+	want := readUint32LE(data[4:])
+	got := crc32.ChecksumIEEE(body)
+	if want != got {
 		return nil, ErrCorruptRecord
 	}
-
-	var p pb.Record
-	if err := proto.Unmarshal(body, &p); err != nil {
+	var pb walpb.PBRecord
+	if err := proto.Unmarshal(body, &pb); err != nil {
 		return nil, err
 	}
 	return &Record{
-		Seq:  p.Seq,
-		Time: p.Time,
-		Data: p.Data,
-		Type: RecordType(p.Type),
+		Seq:  pb.Seq,
+		Time: pb.Time,
+		Data: pb.Data,
+		Type: RecordType(pb.Type),
 	}, nil
 }
 
-// helper funcs
 func putUint32LE(buf []byte, v uint32) {
 	buf[0] = byte(v)
 	buf[1] = byte(v >> 8)

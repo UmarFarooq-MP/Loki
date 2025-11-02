@@ -1,4 +1,4 @@
-module wal
+module loki
 
 go 1.25
 
