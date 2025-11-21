@@ -13,7 +13,7 @@ type OrderBook struct {
 	Bids    *RBTree
 	Asks    *RBTree
 	LastSeq atomic.Uint64
-	Log     wal.WAL // ✅ WAL handle for persistence
+	Log     wal.WAL
 }
 
 // NewOrderBook creates a new order book with WAL enabled
@@ -47,6 +47,7 @@ func (b *OrderBook) placeOrder(
 ) *Order {
 	o := pool.Get()
 	if o == nil {
+		//TODO:: work around should not panic
 		panic("order pool exhausted")
 	}
 	*o = Order{
@@ -55,7 +56,7 @@ func (b *OrderBook) placeOrder(
 	}
 	b.LastSeq.Store(seq)
 
-	// 🧾 WAL log order placement
+	// WAL log order placement
 	b.logOrderEvent("place", o)
 
 	// Market orders don’t use price

@@ -2,7 +2,9 @@ package wal
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -47,24 +49,25 @@ func (i *WALIntegration) ReplayFromSnapshot(snapshotSeq uint64, apply func(*Reco
 	if err != nil {
 		return fmt.Errorf("load index: %w", err)
 	}
+	sort.Slice(index, func(a, b int) bool {
+		return index[a].FirstSeq < index[b].FirstSeq
+	})
 
 	for _, seg := range index {
 		if seg.LastSeq <= snapshotSeq {
 			continue
 		}
 		path := filepath.Join(i.cfg.Dir, seg.File)
-		r, err := OpenReader(path, i.cfg.Serializer)
-		if err != nil {
+		if err := i.replayFile(path, snapshotSeq, apply); err != nil {
 			return err
 		}
-		for r.Next() {
-			rec := r.Record()
-			if rec.Seq <= snapshotSeq {
-				continue
-			}
-			apply(rec)
+	}
+
+	current := filepath.Join(i.cfg.Dir, "current.wal")
+	if _, err := os.Stat(current); err == nil {
+		if err := i.replayFile(current, snapshotSeq, apply); err != nil {
+			return err
 		}
-		r.Close()
 	}
 	return nil
 }
@@ -72,6 +75,25 @@ func (i *WALIntegration) ReplayFromSnapshot(snapshotSeq uint64, apply func(*Reco
 func (i *WALIntegration) Close() error {
 	_ = i.wal.Sync()
 	_ = i.wal.Close()
-	fmt.Println("✅ WAL integration closed")
+	fmt.Println("WAL integration closed")
+	return nil
+}
+
+func (i *WALIntegration) replayFile(path string, snapshotSeq uint64, apply func(*Record)) error {
+	r, err := OpenReader(path, i.cfg.Serializer)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	for r.Next() {
+		rec := r.Record()
+		if rec.Seq <= snapshotSeq {
+			continue
+		}
+		apply(rec)
+	}
+	if err := r.Err(); err != nil {
+		return err
+	}
 	return nil
 }

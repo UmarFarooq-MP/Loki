@@ -126,7 +126,7 @@ func main() {
 	snapper := &Snapshotter{Dir: "./snapshots", Book: book}
 	_ = os.MkdirAll(snapper.Dir, 0o755)
 
-	// 1️⃣ Attempt to load last snapshot
+	// Attempt to load last snapshot
 	snap, err := snapper.LoadLatestSnapshot()
 	if err != nil {
 		panic(fmt.Errorf("failed to load snapshot: %w", err))
@@ -138,8 +138,8 @@ func main() {
 		fmt.Println("No snapshot found, building fresh order book")
 	}
 
-	// 2️⃣ Simulate order flow
-	fmt.Println("📥 Placing sample orders...")
+	//Simulate order flow
+	fmt.Println("Placing sample orders...")
 	pool := NewOrderPool(1024)
 	ring := newRetireRing(1024)
 
@@ -147,7 +147,7 @@ func main() {
 	book.placeOrder(Ask, Limit, 105, 2, 3, 2, pool, ring)
 	book.placeOrder(Bid, Market, 0, 3, 10, 3, pool, ring)
 
-	// 3️⃣ Write snapshot periodically
+	//Write snapshot periodically
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -160,7 +160,7 @@ func main() {
 		}
 	}()
 
-	// 4️⃣ Run engine for demo
+	//Run engine for demo
 	time.Sleep(12 * time.Second)
 	fmt.Println("🏁 Engine stopped. WAL and snapshots written successfully.")
 }

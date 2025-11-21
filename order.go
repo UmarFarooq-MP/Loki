@@ -44,7 +44,7 @@ type Order struct {
 	_           [32]byte // padding for cache line separation
 }
 
-// OrderPool: fixed-capacity stack pool (no GC churn in steady state)
+// OrderPool : fixed-capacity stack pool (no GC churn in steady state)
 type OrderPool struct {
 	store []*Order
 	top   int

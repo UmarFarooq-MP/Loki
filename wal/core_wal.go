@@ -2,13 +2,18 @@ package wal
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const frameHeaderSize = 8
 
 type CoreWAL struct {
 	cfg             WALConfig
@@ -52,33 +57,43 @@ func NewCoreWAL(cfg WALConfig) (*CoreWAL, error) {
 	w := &CoreWAL{
 		cfg:             cfg,
 		file:            f,
-		writer:          bufio.NewWriterSize(f, 1<<20),
 		segmentID:       segID,
 		segmentStartSeq: seq + 1,
 		seq:             seq,
 		lastRotationAt:  time.Now(),
 	}
 
+	if err := w.recoverCurrentState(); err != nil {
+		return nil, err
+	}
+	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+		return nil, err
+	}
+	w.writer = bufio.NewWriterSize(f, 1<<20)
+
 	return w, nil
 }
 
 func (w *CoreWAL) Append(rec *Record) error {
+	rec.Seq = w.seq + 1
 	data, err := w.cfg.Serializer.Encode(rec)
 	if err != nil {
 		return err
 	}
 
-	if w.shouldRotate(len(data)) {
+	recordSize := frameHeaderSize + len(data)
+	if w.shouldRotate(recordSize) {
 		if err := w.rotate(); err != nil {
 			return err
 		}
 	}
 
-	rec.Seq = w.seq + 1
 	w.seq++
-	n, err := w.writer.Write(data)
-	w.bytesWritten += uint64(n)
-	return err
+	if err := writeFrame(w.writer, data); err != nil {
+		return err
+	}
+	w.bytesWritten += uint64(recordSize)
+	return nil
 }
 
 func (w *CoreWAL) shouldRotate(nextSize int) bool {
@@ -152,4 +167,78 @@ func (w *CoreWAL) Close() error {
 	_ = AppendIndexEntry(w.cfg.Dir, entry)
 	fmt.Printf("Finalized WAL → %s (seq %d–%d)\n", newFile, w.segmentStartSeq, w.seq)
 	return nil
+}
+
+func (w *CoreWAL) recoverCurrentState() error {
+	info, err := w.file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		w.bytesWritten = 0
+		return nil
+	}
+	path := filepath.Join(w.cfg.Dir, "current.wal")
+	r, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	var (
+		validBytes int64
+		header     [frameHeaderSize]byte
+	)
+	for {
+		if _, err := io.ReadFull(r, header[:]); err != nil {
+			if err == io.EOF {
+				break
+			}
+			if err == io.ErrUnexpectedEOF {
+				return w.truncateCurrent(validBytes)
+			}
+			return err
+		}
+		payloadLen := binary.LittleEndian.Uint32(header[:4])
+		payload := make([]byte, payloadLen)
+		if _, err := io.ReadFull(r, payload); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return w.truncateCurrent(validBytes)
+			}
+			return err
+		}
+		checksum := binary.LittleEndian.Uint32(header[4:])
+		if crc32.ChecksumIEEE(payload) != checksum {
+			return w.truncateCurrent(validBytes)
+		}
+		rec, err := w.cfg.Serializer.Decode(payload)
+		if err != nil {
+			return err
+		}
+		w.seq = rec.Seq
+		validBytes += int64(frameHeaderSize + len(payload))
+	}
+	w.bytesWritten = uint64(validBytes)
+	return nil
+}
+
+func (w *CoreWAL) truncateCurrent(validBytes int64) error {
+	if err := w.file.Truncate(validBytes); err != nil {
+		return err
+	}
+	if _, err := w.file.Seek(validBytes, io.SeekStart); err != nil {
+		return err
+	}
+	w.bytesWritten = uint64(validBytes)
+	return nil
+}
+
+func writeFrame(wr io.Writer, payload []byte) error {
+	var header [frameHeaderSize]byte
+	binary.LittleEndian.PutUint32(header[:4], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(header[4:], crc32.ChecksumIEEE(payload))
+	if _, err := wr.Write(header[:]); err != nil {
+		return err
+	}
+	_, err := wr.Write(payload)
+	return err
 }
