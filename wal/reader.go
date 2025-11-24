@@ -2,6 +2,10 @@ package wal
 
 import (
 	"bufio"
+	"encoding/binary"
+	"errors"
+	"hash/crc32"
+	"io"
 	"os"
 )
 
@@ -10,6 +14,7 @@ type WALReader struct {
 	reader *bufio.Reader
 	ser    Serializer
 	rec    *Record
+	err    error
 }
 
 func OpenReader(path string, ser Serializer) (*WALReader, error) {
@@ -25,12 +30,36 @@ func OpenReader(path string, ser Serializer) (*WALReader, error) {
 }
 
 func (r *WALReader) Next() bool {
-	data, err := r.reader.ReadBytes('\n')
-	if err != nil {
+	var header [frameHeaderSize]byte
+	if _, err := io.ReadFull(r.reader, header[:]); err != nil {
+		if err == io.EOF {
+			return false
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			r.err = ErrCorruptRecord
+		} else {
+			r.err = err
+		}
 		return false
 	}
-	rec, err := r.ser.Decode(data)
+	length := binary.LittleEndian.Uint32(header[:4])
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r.reader, payload); err != nil {
+		if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
+			r.err = ErrCorruptRecord
+		} else {
+			r.err = err
+		}
+		return false
+	}
+	checksum := binary.LittleEndian.Uint32(header[4:])
+	if crc32.ChecksumIEEE(payload) != checksum {
+		r.err = ErrCorruptRecord
+		return false
+	}
+	rec, err := r.ser.Decode(payload)
 	if err != nil {
+		r.err = err
 		return false
 	}
 	r.rec = rec
@@ -43,4 +72,8 @@ func (r *WALReader) Record() *Record {
 
 func (r *WALReader) Close() {
 	_ = r.file.Close()
+}
+
+func (r *WALReader) Err() error {
+	return r.err
 }

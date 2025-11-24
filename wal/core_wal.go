@@ -3,6 +3,7 @@ package wal
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -75,13 +76,18 @@ func NewCoreWAL(cfg WALConfig) (*CoreWAL, error) {
 }
 
 func (w *CoreWAL) Append(rec *Record) error {
+	// TODO:: change sequencer to get updated via request --- update when sequencer is ready
 	rec.Seq = w.seq + 1
 	data, err := w.cfg.Serializer.Encode(rec)
 	if err != nil {
 		return err
 	}
 
+	//frameHeader = length(4) + CRC(4)
 	recordSize := frameHeaderSize + len(data)
+
+	//TODO :: a good update will be if we can say create a file and make it available in advance instead
+	// Creating at run time , may be a good R&D to later look into
 	if w.shouldRotate(recordSize) {
 		if err := w.rotate(); err != nil {
 			return err
@@ -193,7 +199,7 @@ func (w *CoreWAL) recoverCurrentState() error {
 			if err == io.EOF {
 				break
 			}
-			if err == io.ErrUnexpectedEOF {
+			if errors.Is(err, io.ErrUnexpectedEOF) {
 				return w.truncateCurrent(validBytes)
 			}
 			return err
@@ -201,7 +207,7 @@ func (w *CoreWAL) recoverCurrentState() error {
 		payloadLen := binary.LittleEndian.Uint32(header[:4])
 		payload := make([]byte, payloadLen)
 		if _, err := io.ReadFull(r, payload); err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
 				return w.truncateCurrent(validBytes)
 			}
 			return err
