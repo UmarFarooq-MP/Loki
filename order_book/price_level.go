@@ -1,6 +1,8 @@
-package main
+package order_book
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // PriceLevel holds all active orders at a given price.
 type PriceLevel struct {

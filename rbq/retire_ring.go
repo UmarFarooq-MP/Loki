@@ -1,7 +1,8 @@
-package main
+package rbq
 
 import (
 	"fmt"
+	"loki/order_book"
 	"sync/atomic"
 )
 
@@ -13,18 +14,18 @@ type retireRing struct {
 	tail  uint64
 	_pad2 [56]byte
 
-	buf  []*Order
+	buf  []*order_book.Order
 	mask uint64
 }
 
 // newRetireRing allocates a fixed-size circular buffer (power-of-2 length).
 func newRetireRing(pow2 uint64) *retireRing {
-	return &retireRing{buf: make([]*Order, pow2), mask: pow2 - 1}
+	return &retireRing{buf: make([]*order_book.Order, pow2), mask: pow2 - 1}
 }
 
 // Enqueue pushes an order into the ring.
 // Returns false if the buffer is full.
-func (q *retireRing) Enqueue(o *Order) bool {
+func (q *retireRing) Enqueue(o *order_book.Order) bool {
 	h := q.head
 	t := atomic.LoadUint64(&q.tail)
 	if h-t == uint64(len(q.buf)) {
@@ -37,7 +38,7 @@ func (q *retireRing) Enqueue(o *Order) bool {
 
 // Dequeue pops the next order from the ring.
 // Returns nil if the buffer is empty.
-func (q *retireRing) Dequeue() *Order {
+func (q *retireRing) Dequeue() *order_book.Order {
 	t := q.tail
 	h := atomic.LoadUint64(&q.head)
 	if t == h {

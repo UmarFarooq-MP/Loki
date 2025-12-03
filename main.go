@@ -3,6 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"loki/order_book"
+	"loki/rbq"
+	"loki/snapshots"
 	"os"
 	"path/filepath"
 	"time"
@@ -32,7 +35,7 @@ type OrderSummary struct {
 
 type Snapshotter struct {
 	Dir  string
-	Book *OrderBook
+	Book *order_book.OrderBook
 }
 
 // SaveSnapshot writes the current order book to a JSON snapshot.
@@ -45,7 +48,7 @@ func (s *Snapshotter) SaveSnapshot() error {
 	}
 
 	// Iterate all active orders
-	s.Book.SnapshotActiveIter(&Reader{}, func(price int64, o *Order) {
+	s.Book.SnapshotActiveIter(&snapshots.Reader{}, func(price int64, o *order_book.Order) {
 		entry := OrderSummary{
 			ID:     o.ID,
 			Side:   sideToString(o.Side),
@@ -54,7 +57,7 @@ func (s *Snapshotter) SaveSnapshot() error {
 			Filled: o.Filled,
 			Status: statusToString(o.Status),
 		}
-		if o.Side == Bid {
+		if o.Side == order_book.Bid {
 			snap.Bids[price] = append(snap.Bids[price], entry)
 		} else {
 			snap.Asks[price] = append(snap.Asks[price], entry)
@@ -101,15 +104,15 @@ func (s *Snapshotter) LoadLatestSnapshot() (*Snapshot, error) {
 
 // -------------------- Utilities --------------------
 
-func sideToString(s Side) string {
-	if s == Bid {
+func sideToString(s order_book.Side) string {
+	if s == order_book.Bid {
 		return "bid"
 	}
 	return "ask"
 }
 
-func statusToString(st OrderStatus) string {
-	if st == Active {
+func statusToString(st order_book.OrderStatus) string {
+	if st == order_book.Active {
 		return "active"
 	}
 	return "inactive"
@@ -120,7 +123,7 @@ func statusToString(st OrderStatus) string {
 func main() {
 	fmt.Println("Starting order book engine with WAL + Snapshotter")
 
-	book := NewOrderBook()
+	book := order_book.NewOrderBook()
 	defer book.Log.Close()
 
 	snapper := &Snapshotter{Dir: "./snapshots", Book: book}
@@ -140,12 +143,12 @@ func main() {
 
 	//Simulate order flow
 	fmt.Println("Placing sample orders...")
-	pool := NewOrderPool(1024)
-	ring := newRetireRing(1024)
+	pool := order_book.NewOrderPool(1024)
+	ring := rbq.newRetireRing(1024)
 
-	book.placeOrder(Bid, Limit, 100, 1, 5, 1, pool, ring)
-	book.placeOrder(Ask, Limit, 105, 2, 3, 2, pool, ring)
-	book.placeOrder(Bid, Market, 0, 3, 10, 3, pool, ring)
+	book.placeOrder(order_book.Bid, order_book.Limit, 100, 1, 5, 1, pool, ring)
+	book.placeOrder(order_book.Ask, order_book.Limit, 105, 2, 3, 2, pool, ring)
+	book.placeOrder(order_book.Bid, order_book.Market, 0, 3, 10, 3, pool, ring)
 
 	//Write snapshot periodically
 	go func() {
@@ -162,5 +165,5 @@ func main() {
 
 	//Run engine for demo
 	time.Sleep(12 * time.Second)
-	fmt.Println("🏁 Engine stopped. WAL and snapshots written successfully.")
+	fmt.Println("Engine stopped. WAL and snapshots written successfully.")
 }

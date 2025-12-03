@@ -1,6 +1,8 @@
-package main
+package order_book
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestPriceLevelFIFO(t *testing.T) {
 	lvl := &PriceLevel{Price: 100}

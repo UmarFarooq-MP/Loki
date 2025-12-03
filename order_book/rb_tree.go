@@ -1,6 +1,8 @@
-package main
+package order_book
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Color uint8
 

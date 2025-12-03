@@ -1,6 +1,7 @@
-package main
+package order_book
 
 import (
+	"loki"
 	"testing"
 )
 
@@ -8,7 +9,7 @@ func BenchmarkPlaceOrder(b *testing.B) {
 	book := NewOrderBook()
 	book.Log = nil
 	pool := NewOrderPool(max(b.N, 1<<22))
-	rq := newRetireRing(uint64(b.N) * 2)
+	rq := main.newRetireRing(uint64(b.N) * 2)
 	seq := uint64(1)
 
 	b.ResetTimer()
@@ -22,7 +23,7 @@ func BenchmarkCancelOrder(b *testing.B) {
 	book := NewOrderBook()
 	book.Log = nil
 	pool := NewOrderPool(max(b.N, 1<<22))
-	rq := newRetireRing(uint64(b.N) * 2)
+	rq := main.newRetireRing(uint64(b.N) * 2)
 
 	var orders []*Order
 	for i := 0; i < b.N; i++ {

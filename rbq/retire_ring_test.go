@@ -1,11 +1,14 @@
-package main
+package rbq
 
-import "testing"
+import (
+	"loki/order_book"
+	"testing"
+)
 
 func TestRetireRingBasic(t *testing.T) {
 	r := newRetireRing(4) // capacity 4
-	o1 := &Order{ID: 1}
-	o2 := &Order{ID: 2}
+	o1 := &order_book.Order{ID: 1}
+	o2 := &order_book.Order{ID: 2}
 
 	if !r.Enqueue(o1) || !r.Enqueue(o2) {
 		t.Fatal("enqueue failed unexpectedly")

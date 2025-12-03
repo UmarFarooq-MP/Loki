@@ -1,17 +1,19 @@
-package main
+package order_book
 
 import (
+	"loki"
+	"loki/snapshots"
 	"os"
 	"testing"
 	"time"
 )
 
-func newTestEnv() (*OrderBook, *OrderPool, *retireRing, *Reader) {
+func newTestEnv() (*OrderBook, *OrderPool, *main.retireRing, *snapshots.Reader) {
 	book := NewOrderBook()
 	book.Log = nil // disable WAL writes for tests
 	pool := NewOrderPool(1024)
-	rq := newRetireRing(128)
-	reader := &Reader{}
+	rq := main.newRetireRing(128)
+	reader := &snapshots.Reader{}
 	return book, pool, rq, reader
 }
 
@@ -112,7 +114,7 @@ func TestOrderPoolExhaustion(t *testing.T) {
 	book := NewOrderBook()
 	book.Log = nil
 	pool := NewOrderPool(1)
-	rq := newRetireRing(1)
+	rq := main.newRetireRing(1)
 
 	_ = book.placeOrder(Bid, Limit, 100, 1, time.Now().UnixNano(), 1, pool, rq)
 	defer func() {
@@ -132,11 +134,11 @@ func TestSnapshotAndReplayIntegration(t *testing.T) {
 	book.Log = nil // no WAL writes for snapshot test
 
 	pool := NewOrderPool(100)
-	rq := newRetireRing(10)
+	rq := main.newRetireRing(10)
 	book.placeOrder(Bid, Limit, 99, 1, 1, 1, pool, rq)
 	book.placeOrder(Ask, Limit, 101, 2, 2, 2, pool, rq)
 
-	snap := &Snapshotter{Dir: "./snapshots", Book: book}
+	snap := &main.Snapshotter{Dir: "./snapshots", Book: book}
 	if err := snap.SaveSnapshot(); err != nil {
 		t.Fatalf("snapshot failed: %v", err)
 	}

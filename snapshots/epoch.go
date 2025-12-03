@@ -1,4 +1,4 @@
-package main
+package snapshots
 
 import "sync/atomic"
 
