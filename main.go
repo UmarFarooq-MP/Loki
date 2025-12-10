@@ -48,7 +48,7 @@ func (s *Snapshotter) SaveSnapshot() error {
 	}
 
 	// Iterate all active orders
-	s.Book.SnapshotActiveIter(&snapshots.Reader{}, func(price int64, o *order_book.Order) {
+	s.Book.SnapshotActiveIter(&snapshotter.Reader{}, func(price int64, o *order_book.Order) {
 		entry := OrderSummary{
 			ID:     o.ID,
 			Side:   sideToString(o.Side),

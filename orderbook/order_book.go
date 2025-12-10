@@ -1,13 +1,12 @@
-package order_book
+package orderbook
 
 import (
 	"fmt"
-	"loki"
-	"loki/snapshots"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"loki/snapshotter"
 	"loki/wal"
 )
 
@@ -18,7 +17,6 @@ type OrderBook struct {
 	Log     wal.WAL
 }
 
-// NewOrderBook creates a new order book with WAL enabled
 func NewOrderBook() *OrderBook {
 	cfg := wal.Config{
 		Dir:             "./wal_data",
@@ -41,15 +39,13 @@ func NewOrderBook() *OrderBook {
 
 // ---------------- Matching Engine ---------------- //
 
-// Place an order (runs matching first, then rests if needed)
 func (b *OrderBook) placeOrder(
 	side Side, otype OrderType, price int64,
 	id uint64, qty int64, seq uint64,
-	pool *OrderPool, rq *main.retireRing,
+	pool *OrderPool, rq *RetireRing,
 ) *Order {
 	o := pool.Get()
 	if o == nil {
-		//TODO:: work around should not panic
 		panic("order pool exhausted")
 	}
 	*o = Order{
@@ -57,17 +53,13 @@ func (b *OrderBook) placeOrder(
 		Qty: qty, SeqID: seq, Status: Active,
 	}
 	b.LastSeq.Store(seq)
-
-	// WAL log order placement
-	//TODO:: replace magic strings
 	b.logOrderEvent("place", o)
 
-	// Market orders don’t use price
 	if o.Type == Market {
 		o.Price = 0
 	}
 
-	// --- Special handling for FOK (dry-run) ---
+	// --- FOK dry-run ---
 	if o.Type == FOK {
 		available := b.checkLiquidity(side, o.Price, o.Qty)
 		if available < o.Qty {
@@ -78,11 +70,9 @@ func (b *OrderBook) placeOrder(
 		}
 	}
 
-	// Match against opposite side
 	matched := b.match(o, rq)
 	o.Filled = matched
 
-	// Decide what to do with leftover
 	switch o.Type {
 	case Limit:
 		if o.Qty > 0 {
@@ -102,12 +92,10 @@ func (b *OrderBook) placeOrder(
 			_ = rq.Enqueue(o)
 		}
 	}
-
 	return o
 }
 
-// match executes trades against opposite side
-func (b *OrderBook) match(o *Order, rq *main.retireRing) int64 {
+func (b *OrderBook) match(o *Order, rq *RetireRing) int64 {
 	filled := int64(0)
 
 	if o.Side == Bid {
@@ -121,15 +109,13 @@ func (b *OrderBook) match(o *Order, rq *main.retireRing) int64 {
 			o.Qty -= trade
 			head.Qty -= trade
 			filled += trade
-
-			// 🧾 WAL log trade
 			b.logTrade(o, head.Price, trade)
 
 			if head.Qty == 0 {
 				b.cancelOrder(bestAsk.Price, head, rq, Ask)
 			}
 		}
-	} else { // Ask side
+	} else {
 		for o.Qty > 0 {
 			bestBid := b.Bids.MaxLevel()
 			if bestBid == nil || (o.Type != Market && bestBid.Price < o.Price) {
@@ -140,8 +126,6 @@ func (b *OrderBook) match(o *Order, rq *main.retireRing) int64 {
 			o.Qty -= trade
 			head.Qty -= trade
 			filled += trade
-
-			// 🧾 WAL log trade
 			b.logTrade(o, head.Price, trade)
 
 			if head.Qty == 0 {
@@ -152,7 +136,6 @@ func (b *OrderBook) match(o *Order, rq *main.retireRing) int64 {
 	return filled
 }
 
-// enqueue leftover order into book
 func (b *OrderBook) enqueue(o *Order) {
 	if o.Side == Bid {
 		lvl := b.Bids.UpsertLevel(o.Price)
@@ -163,10 +146,9 @@ func (b *OrderBook) enqueue(o *Order) {
 	}
 }
 
-// cancel order and recycle
-func (b *OrderBook) cancelOrder(price int64, o *Order, rq *main.retireRing, side Side) {
+func (b *OrderBook) cancelOrder(price int64, o *Order, rq *RetireRing, side Side) {
 	o.Status = Inactive
-	o.retireEpoch = main.globalEpoch.Load()
+	o.retireEpoch = snapshotter.AdvanceEpoch()
 
 	var lvl *PriceLevel
 	if side == Bid {
@@ -188,14 +170,11 @@ func (b *OrderBook) cancelOrder(price int64, o *Order, rq *main.retireRing, side
 	if !rq.Enqueue(o) {
 		panic("retire ring full")
 	}
-
-	// 🧾 WAL log cancel
 	b.logOrderEvent("cancel", o)
 }
 
 // ---------------- WAL Utilities ---------------- //
 
-// logOrderEvent writes order placement, cancel, or reject events to WAL
 func (b *OrderBook) logOrderEvent(event string, o *Order) {
 	if b.Log == nil {
 		return
@@ -210,7 +189,6 @@ func (b *OrderBook) logOrderEvent(event string, o *Order) {
 	_ = b.Log.Append(rec)
 }
 
-// logTrade writes matched trade info to WAL
 func (b *OrderBook) logTrade(o *Order, price int64, qty int64) {
 	if b.Log == nil {
 		return
@@ -225,7 +203,6 @@ func (b *OrderBook) logTrade(o *Order, price int64, qty int64) {
 	_ = b.Log.Append(rec)
 }
 
-// ReplayFromWAL rebuilds the book by reading historical records
 func (b *OrderBook) ReplayFromWAL() error {
 	if b.Log == nil {
 		return nil
@@ -237,15 +214,11 @@ func (b *OrderBook) ReplayFromWAL() error {
 		if len(parts) == 0 {
 			return
 		}
-
 		switch parts[0] {
 		case "place":
-			o := DecodeBinary([]byte{}) // optional: adapt to EncodeBinary()
-			_ = o
+			// optional recovery logic
 		case "cancel":
-			// TODO: optional restore logic
 		case "trade":
-			// optional trade replay
 		}
 	})
 }
@@ -274,28 +247,9 @@ func (b *OrderBook) checkLiquidity(side Side, limitPrice int64, desired int64) i
 	return available
 }
 
-// ---------------- Epoch Reclaim ---------------- //
-
-func advanceEpochAndReclaim(rq *main.retireRing, pool *OrderPool, rs ...*snapshots.Reader) {
-	main.globalEpoch.Add(1)
-	min := main.minReaderEpoch(rs...)
-	for {
-		o := rq.Dequeue()
-		if o == nil {
-			break
-		}
-		if min == ^uint64(0) || o.retireEpoch < min {
-			pool.Put(o)
-		} else {
-			_ = rq.Enqueue(o)
-			break
-		}
-	}
-}
-
 // ---------------- Snapshots ---------------- //
 
-func (b *OrderBook) SnapshotActiveIter(r *snapshots.Reader, visit func(price int64, o *Order)) {
+func (b *OrderBook) SnapshotActiveIter(r *snapshotter.Reader, visit func(price int64, o *Order)) {
 	r.EnterRead()
 	b.Bids.ForEachDescending(func(lvl *PriceLevel) bool {
 		for n := lvl.head; n != nil; n = n.next {

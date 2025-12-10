@@ -1,0 +1,16 @@
+# Build artifacts
+bin/
+*.exe
+*.out
+
+# Logs
+*.log
+wal_data/
+snapshots/
+
+# Dependencies
+vendor/
+
+# IDE
+.idea/
+.vscode/
