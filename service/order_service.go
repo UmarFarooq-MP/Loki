@@ -1,56 +1,69 @@
 package service
 
 import (
-	_ "sync/atomic"
+	"fmt"
+	"time"
 
 	"loki/memory"
 	"loki/orderbook"
-	"loki/snapshotter"
+	"loki/rcu"
+	"loki/wal/entry"
+	"loki/wal/exit"
 )
 
-// OrderService coordinates the core order book, memory pools, and snapshot readers.
 type OrderService struct {
-	Book   *orderbook.OrderBook
-	Pool   *memory.OrderPool
-	Retire *memory.RetireRing
-	Reader *snapshotter.Reader
+	Book     *orderbook.OrderBook
+	Pool     *memory.OrderPool
+	Ring     *memory.RetireRing
+	Reader   *rcu.Reader
+	EntryWAL *entry.WAL
+	ExitWAL  *exit.ExitWAL
 }
 
-// NewOrderService initializes the in-memory matching engine service.
-func NewOrderService() *OrderService {
+// NewOrderService constructs the full order service stack.
+func NewOrderService(
+	book *orderbook.OrderBook,
+	pool *memory.OrderPool,
+	ring *memory.RetireRing,
+	reader *rcu.Reader,
+	entryWAL *entry.WAL,
+	exitWAL *exit.ExitWAL,
+) *OrderService {
 	return &OrderService{
-		Book:   orderbook.NewOrderBook(),
-		Pool:   memory.NewOrderPool(1 << 20),  // 1M capacity
-		Retire: memory.NewRetireRing(1 << 16), // 64K retire ring
-		Reader: snapshotter.NewReader(),
+		Book:     book,
+		Pool:     pool,
+		Ring:     ring,
+		Reader:   reader,
+		EntryWAL: entryWAL,
+		ExitWAL:  exitWAL,
 	}
 }
 
-// PlaceOrder inserts a new order into the book and updates sequence.
-func (s *OrderService) PlaceOrder(
-	side orderbook.Side,
-	otype orderbook.OrderType,
-	price int64,
-	qty uint64,
-	userID uint64,
-) {
-	seq := s.Book.LastSeq.Add(1) // use atomic.Uint64 method
-	s.Book.PlaceOrder(side, otype, price, uint64(qty), int64(userID), seq, s.Pool, s.Retire)
+// PlaceOrder handles new incoming orders.
+func (s *OrderService) PlaceOrder(side orderbook.Side, otype orderbook.OrderType, price int64, qty int64, userID uint64) {
+	seq := uint64(time.Now().UnixNano())
+
+	// Log into entry WAL
+	data := fmt.Sprintf("place|%d|%d|%d|%d|%d", userID, side, otype, price, qty)
+	rec := entry.NewRecord(entry.RecordPlace, []byte(data))
+	_ = s.EntryWAL.Append(rec)
+
+	// Process order
+	o := s.Book.PlaceOrder(side, otype, price, qty, userID, seq, s.Pool, s.Ring)
+
+	// Store state in exit WAL
+	state := "ready"
+	if o.Status == orderbook.Inactive {
+		state = "inactive"
+	}
+	s.ExitWAL.Update(o.ID, state)
 }
 
-// Snapshot returns a list of active orders for clients.
-func (s *OrderService) Snapshot() []orderbook.Order {
-	var result []orderbook.Order
-
-	// Ensure your OrderBook actually defines SnapshotActiveIter
-	// Signature: SnapshotActiveIter(reader *snapshotter.Reader, visit func(price int64, o *Order))
+// Snapshot returns the current view of the order book.
+func (s *OrderService) Snapshot() []*orderbook.Order {
+	var orders []*orderbook.Order
 	s.Book.SnapshotActiveIter(s.Reader, func(price int64, o *orderbook.Order) {
-		result = append(result, *o)
+		orders = append(orders, o)
 	})
-	return result
-}
-
-// LastSeq returns the last used sequence number.
-func (s *OrderService) LastSeq() uint64 {
-	return s.Book.LastSeq.Load()
+	return orders
 }

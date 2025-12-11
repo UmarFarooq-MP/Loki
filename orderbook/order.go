@@ -22,7 +22,6 @@ const (
 	Inactive
 )
 
-// Order represents a single limit/market order.
 type Order struct {
 	ID          uint64
 	Price       int64
@@ -36,3 +35,8 @@ type Order struct {
 	next        *Order
 	prev        *Order
 }
+
+// Implement memory.Order interface.
+func (o *Order) Reset()                  { *o = Order{} }
+func (o *Order) RetireEpoch() uint64     { return o.retireEpoch }
+func (o *Order) SetRetireEpoch(v uint64) { o.retireEpoch = v }
