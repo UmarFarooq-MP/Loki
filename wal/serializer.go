@@ -1,45 +1,55 @@
 package wal
 
 import (
-	"encoding/binary"
-	"errors"
+	"encoding/json"
+	"io"
+
+	"google.golang.org/protobuf/proto"
 )
 
+// Serializer defines the interface for encoding and decoding WAL records.
 type Serializer interface {
 	Encode(*Record) ([]byte, error)
-	Decode([]byte) (*Record, error)
+	Decoder(io.Reader) func() (*Record, error)
 }
 
-var ErrCorruptRecord = errors.New("wal: corrupted record")
+// ---------------- JSON Serializer ---------------- //
 
-type BinarySerializer struct{}
+type JSONSerializer struct{}
 
-func (BinarySerializer) Encode(rec *Record) ([]byte, error) {
-	dataLen := uint32(len(rec.Data))
-	buf := make([]byte, 1+8+8+4+len(rec.Data))
-	buf[0] = byte(rec.Type)
-	binary.LittleEndian.PutUint64(buf[1:9], rec.Seq)
-	binary.LittleEndian.PutUint64(buf[9:17], uint64(rec.Time))
-	binary.LittleEndian.PutUint32(buf[17:21], dataLen)
-	copy(buf[21:], rec.Data)
-	return buf, nil
+func (JSONSerializer) Encode(r *Record) ([]byte, error) {
+	return json.Marshal(r)
 }
 
-func (BinarySerializer) Decode(b []byte) (*Record, error) {
-	if len(b) < 21 {
-		return nil, ErrCorruptRecord
+func (JSONSerializer) Decoder(r io.Reader) func() (*Record, error) {
+	dec := json.NewDecoder(r)
+	return func() (*Record, error) {
+		var rec Record
+		err := dec.Decode(&rec)
+		return &rec, err
 	}
-	length := binary.LittleEndian.Uint32(b[17:21])
-	end := 21 + int(length)
-	if end > len(b) {
-		return nil, ErrCorruptRecord
+}
+
+// ---------------- Proto (gRPC) Serializer ---------------- //
+
+type ProtoSerializer struct{}
+
+func (ProtoSerializer) Encode(r *Record) ([]byte, error) {
+	return proto.Marshal(r)
+}
+
+func (ProtoSerializer) Decoder(r io.Reader) func() (*Record, error) {
+	return func() (*Record, error) {
+		// Note: gRPC proto doesn’t have streaming decode natively.
+		// You’ll usually read chunk-by-chunk during replay.
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, err
+		}
+		rec := &Record{}
+		if err := proto.Unmarshal(data, rec); err != nil {
+			return nil, err
+		}
+		return rec, nil
 	}
-	rec := &Record{
-		Type: RecordType(b[0]),
-		Seq:  binary.LittleEndian.Uint64(b[1:9]),
-		Time: int64(binary.LittleEndian.Uint64(b[9:17])),
-		Data: make([]byte, length),
-	}
-	copy(rec.Data, b[21:end])
-	return rec, nil
 }
