@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package loki.pb;
+option go_package = "api/pb;pb";
+
+// ---- ENUMS ----
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  BID = 1;
+  ASK = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  LIMIT = 1;
+  MARKET = 2;
+  IOC = 3;
+  FOK = 4;
+  POST_ONLY = 5;
+}
+
+// ---- MESSAGES ----
+
+message PlaceOrderRequest {
+  Side side = 1;
+  OrderType type = 2;
+  int64 price = 3;
+  int64 qty = 4;
+  uint64 user_id = 5;
+}
+
+message PlaceOrderResponse {
+  string status = 1;
+  uint64 seq_id = 2;
+}
+
+message CancelOrderRequest {
+  uint64 order_id = 1;
+  Side side = 2;
+  int64 price = 3;
+}
+
+message CancelOrderResponse {
+  string status = 1;
+}
+
+message SnapshotRequest {}
+
+message OrderEntry {
+  uint64 id = 1;
+  Side side = 2;
+  OrderType type = 3;
+  int64 price = 4;
+  int64 qty = 5;
+}
+
+message SnapshotResponse {
+  repeated OrderEntry orders = 1;
+}
+
+// ---- SERVICE ----
+
+service OrderService {
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+  rpc GetSnapshot(SnapshotRequest) returns (SnapshotResponse);
+}

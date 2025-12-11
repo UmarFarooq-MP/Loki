@@ -2,37 +2,39 @@ package orderbook
 
 type PriceLevel struct {
 	Price      int64
+	head       *Order
+	tail       *Order
 	TotalQty   int64
-	head, tail *Order
+	OrderCount int
 }
 
-func (pl *PriceLevel) Enqueue(o *Order) {
-	if pl.tail == nil {
-		pl.head = o
-		pl.tail = o
+func (p *PriceLevel) Enqueue(o *Order) {
+	if p.head == nil {
+		p.head = o
+		p.tail = o
 	} else {
-		pl.tail.next = o
-		o.prev = pl.tail
-		pl.tail = o
+		p.tail.next = o
+		o.prev = p.tail
+		p.tail = o
 	}
-	pl.TotalQty += o.Qty
+	p.TotalQty += o.Qty
+	p.OrderCount++
 }
 
-func (pl *PriceLevel) unlinkAlreadyInactive(o *Order) {
-	if o == nil {
-		return
-	}
+func (p *PriceLevel) unlinkAlreadyInactive(o *Order) {
 	if o.prev != nil {
 		o.prev.next = o.next
 	} else {
-		pl.head = o.next
+		p.head = o.next
 	}
 	if o.next != nil {
 		o.next.prev = o.prev
 	} else {
-		pl.tail = o.prev
+		p.tail = o.prev
 	}
-	pl.TotalQty -= o.Qty
-	o.prev = nil
-	o.next = nil
+	p.TotalQty -= o.Qty
+	p.OrderCount--
+	if p.TotalQty < 0 {
+		p.TotalQty = 0
+	}
 }

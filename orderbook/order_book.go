@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"loki/memory"
 	"loki/snapshotter"
 	"loki/wal"
 )
@@ -29,7 +30,6 @@ func NewOrderBook() *OrderBook {
 	if err != nil {
 		panic(fmt.Errorf("failed to init WAL: %w", err))
 	}
-
 	return &OrderBook{
 		Bids: NewRBTree(),
 		Asks: NewRBTree(),
@@ -37,29 +37,23 @@ func NewOrderBook() *OrderBook {
 	}
 }
 
-// ---------------- Matching Engine ---------------- //
-
-func (b *OrderBook) placeOrder(
+func (b *OrderBook) PlaceOrder(
 	side Side, otype OrderType, price int64,
 	id uint64, qty int64, seq uint64,
-	pool *OrderPool, rq *RetireRing,
+	pool *memory.OrderPool, rq *memory.RetireRing,
 ) *Order {
-	o := pool.Get()
-	if o == nil {
-		panic("order pool exhausted")
-	}
-	*o = Order{
-		ID: id, Side: side, Type: otype, Price: price,
-		Qty: qty, SeqID: seq, Status: Active,
+	o := &Order{
+		ID:     id,
+		Side:   side,
+		Type:   otype,
+		Price:  price,
+		Qty:    qty,
+		SeqID:  seq,
+		Status: Active,
 	}
 	b.LastSeq.Store(seq)
 	b.logOrderEvent("place", o)
 
-	if o.Type == Market {
-		o.Price = 0
-	}
-
-	// --- FOK dry-run ---
 	if o.Type == FOK {
 		available := b.checkLiquidity(side, o.Price, o.Qty)
 		if available < o.Qty {
@@ -70,8 +64,8 @@ func (b *OrderBook) placeOrder(
 		}
 	}
 
-	matched := b.match(o, rq)
-	o.Filled = matched
+	filled := b.match(o, rq)
+	o.Filled = filled
 
 	switch o.Type {
 	case Limit:
@@ -79,7 +73,7 @@ func (b *OrderBook) placeOrder(
 			b.enqueue(o)
 		}
 	case PostOnly:
-		if matched > 0 {
+		if filled > 0 {
 			o.Status = Inactive
 			_ = rq.Enqueue(o)
 			b.logOrderEvent("reject-cross", o)
@@ -95,7 +89,7 @@ func (b *OrderBook) placeOrder(
 	return o
 }
 
-func (b *OrderBook) match(o *Order, rq *RetireRing) int64 {
+func (b *OrderBook) match(o *Order, rq *memory.RetireRing) int64 {
 	filled := int64(0)
 
 	if o.Side == Bid {
@@ -110,7 +104,6 @@ func (b *OrderBook) match(o *Order, rq *RetireRing) int64 {
 			head.Qty -= trade
 			filled += trade
 			b.logTrade(o, head.Price, trade)
-
 			if head.Qty == 0 {
 				b.cancelOrder(bestAsk.Price, head, rq, Ask)
 			}
@@ -127,7 +120,6 @@ func (b *OrderBook) match(o *Order, rq *RetireRing) int64 {
 			head.Qty -= trade
 			filled += trade
 			b.logTrade(o, head.Price, trade)
-
 			if head.Qty == 0 {
 				b.cancelOrder(bestBid.Price, head, rq, Bid)
 			}
@@ -146,9 +138,9 @@ func (b *OrderBook) enqueue(o *Order) {
 	}
 }
 
-func (b *OrderBook) cancelOrder(price int64, o *Order, rq *RetireRing, side Side) {
+func (b *OrderBook) cancelOrder(price int64, o *Order, rq *memory.RetireRing, side Side) {
 	o.Status = Inactive
-	o.retireEpoch = snapshotter.AdvanceEpoch()
+	o.retireEpoch = memory.GlobalEpoch.Load()
 
 	var lvl *PriceLevel
 	if side == Bid {
@@ -172,8 +164,6 @@ func (b *OrderBook) cancelOrder(price int64, o *Order, rq *RetireRing, side Side
 	}
 	b.logOrderEvent("cancel", o)
 }
-
-// ---------------- WAL Utilities ---------------- //
 
 func (b *OrderBook) logOrderEvent(event string, o *Order) {
 	if b.Log == nil {
@@ -207,23 +197,14 @@ func (b *OrderBook) ReplayFromWAL() error {
 	if b.Log == nil {
 		return nil
 	}
-	fmt.Println("Replaying from WAL ...")
-
+	fmt.Println("🔁 Replaying from WAL...")
 	return b.Log.ReplayFrom(0, func(r *wal.Record) {
 		parts := strings.Split(string(r.Data), "|")
 		if len(parts) == 0 {
 			return
 		}
-		switch parts[0] {
-		case "place":
-			// optional recovery logic
-		case "cancel":
-		case "trade":
-		}
 	})
 }
-
-// ---------------- FOK Pre-check ---------------- //
 
 func (b *OrderBook) checkLiquidity(side Side, limitPrice int64, desired int64) int64 {
 	available := int64(0)
@@ -247,27 +228,28 @@ func (b *OrderBook) checkLiquidity(side Side, limitPrice int64, desired int64) i
 	return available
 }
 
-// ---------------- Snapshots ---------------- //
-
+// SnapshotActiveIter iterates through all active orders.
 func (b *OrderBook) SnapshotActiveIter(r *snapshotter.Reader, visit func(price int64, o *Order)) {
 	r.EnterRead()
+	defer r.ExitRead()
+
 	b.Bids.ForEachDescending(func(lvl *PriceLevel) bool {
-		for n := lvl.head; n != nil; n = n.next {
-			if n.Status == Active {
-				visit(lvl.Price, n)
+		for o := lvl.head; o != nil; o = o.next {
+			if o.Status == Active {
+				visit(lvl.Price, o)
 			}
 		}
 		return true
 	})
+
 	b.Asks.ForEachAscending(func(lvl *PriceLevel) bool {
-		for n := lvl.head; n != nil; n = n.next {
-			if n.Status == Active {
-				visit(lvl.Price, n)
+		for o := lvl.head; o != nil; o = o.next {
+			if o.Status == Active {
+				visit(lvl.Price, o)
 			}
 		}
 		return true
 	})
-	r.ExitRead()
 }
 
 func min(a, b int64) int64 {
