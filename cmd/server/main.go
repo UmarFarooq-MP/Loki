@@ -8,66 +8,83 @@ import (
 
 	"google.golang.org/grpc"
 
-	"loki/api/grpc"
+	"loki/api/grpcserver"
 	pb "loki/api/pb"
-	"loki/boradcaster"
-	"loki/memory"
-	"loki/orderbook"
-	"loki/rcu"
+
+	"loki/domain/orderbook"
+	"loki/infra/memory"
+	"loki/infra/wal"
 	"loki/service"
-	"loki/snapshotter"
-	"loki/wal/entry"
-	"loki/wal/exit"
+	"loki/snapshot"
 )
 
 func main() {
-	// --- Initialize WALs ---
-	entryCfg := entry.Config{
-		Dir:             "./wal_entry",
-		SegmentSize:     2 * 1024 * 1024,
+	// ─────────────────────────────────────────────
+	// Infra: WAL
+	// ─────────────────────────────────────────────
+	w, err := wal.New(wal.Config{
+		Dir:             "./wal",
+		SegmentSize:     2 * 1024 * 1024, // 2MB
 		SegmentDuration: time.Minute,
-	}
-	entryWAL, err := entry.New(entryCfg)
+	})
 	if err != nil {
-		log.Fatalf("failed to initialize entry WAL: %v", err)
+		log.Fatalf("failed to init WAL: %v", err)
 	}
 
-	exitWAL := exit.NewExitWAL()
-
-	// --- Initialize memory + snapshot subsystems ---
-	pool := memory.NewOrderPool(1_000_000)
+	// ─────────────────────────────────────────────
+	// Infra: Memory
+	// ─────────────────────────────────────────────
+	pool := memory.NewPool(func() *orderbook.Order {
+		return &orderbook.Order{}
+	})
 	ring := memory.NewRetireRing(1 << 18) // 256K
-	reader := &rcu.Reader{}
+	reader := snapshot.NewReader()
 
-	// --- Initialize OrderBook ---
+	// ─────────────────────────────────────────────
+	// Domain
+	// ─────────────────────────────────────────────
 	book := orderbook.NewOrderBook()
 
-	// --- Initialize service layer ---
-	svc := service.NewOrderService(book, pool, ring, reader, entryWAL, exitWAL)
+	// ─────────────────────────────────────────────
+	// Service
+	// ─────────────────────────────────────────────
+	svc := service.NewOrderService(
+		book,
+		pool,
+		ring,
+		reader,
+		w,
+	)
 
-	// --- Initialize broadcaster (cron-style flush to Kafka) ---
-	bc := broadcaster.NewBroadcaster(exitWAL)
-	bc.StartCron(5 * time.Second)
-
-	// --- Periodic reclaimer (snapshotter) ---
+	// ─────────────────────────────────────────────
+	// Background: Epoch Reclamation
+	// ─────────────────────────────────────────────
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
 		for range ticker.C {
-			snapshotter.AdvanceEpochAndReclaim(ring, pool, reader)
+			svc.AdvanceEpoch()
 		}
 	}()
 
-	// --- Start gRPC server ---
-	grpcSrv := grpc.NewServer()
-	pb.RegisterOrderServiceServer(grpcSrv, grpcserver.NewServer(svc))
-
-	listener, err := net.Listen("tcp", ":50051")
+	// ─────────────────────────────────────────────
+	// gRPC Server
+	// ─────────────────────────────────────────────
+	lis, err := net.Listen("tcp", ":50051")
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
 
-	fmt.Println("Loki Exchange Engine running on :50051")
-	if err := grpcSrv.Serve(listener); err != nil {
-		log.Fatalf("server exited: %v", err)
+	grpcSrv := grpc.NewServer()
+	pb.RegisterOrderServiceServer(
+		grpcSrv,
+		grpcserver.NewServer(svc),
+	)
+
+	fmt.Println("🚀 Loki matching engine running on :50051")
+
+	if err := grpcSrv.Serve(lis); err != nil {
+		log.Fatalf("gRPC server exited: %v", err)
 	}
 }

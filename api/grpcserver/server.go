@@ -5,10 +5,11 @@ import (
 	"log"
 
 	pb "loki/api/pb"
-	"loki/orderbook"
+	"loki/domain/orderbook"
 	"loki/service"
 )
 
+// Server adapts OrderService to gRPC.
 type Server struct {
 	pb.UnimplementedOrderServiceServer
 	svc *service.OrderService
@@ -18,24 +19,62 @@ func NewServer(svc *service.OrderService) *Server {
 	return &Server{svc: svc}
 }
 
-func (s *Server) PlaceOrder(ctx context.Context, req *pb.PlaceOrderRequest) (*pb.PlaceOrderResponse, error) {
+// -------------------- Commands --------------------
+
+func (s *Server) PlaceOrder(
+	ctx context.Context,
+	req *pb.PlaceOrderRequest,
+) (*pb.PlaceOrderResponse, error) {
 	side := toSide(req.Side)
 	otype := toType(req.Type)
 
-	s.svc.PlaceOrder(side, otype, req.Price, req.Qty, req.UserId)
-	log.Printf("[gRPC] Placed order: side=%v type=%v price=%d qty=%d", side, otype, req.Price, req.Qty)
+	seq := s.svc.PlaceOrder(
+		side,
+		otype,
+		req.Price,
+		req.Qty,
+		req.UserId,
+	)
 
-	return &pb.PlaceOrderResponse{Status: "ok", SeqId: s.svc.Book.LastSeq.Load()}, nil
+	log.Printf(
+		"[gRPC] PlaceOrder side=%v type=%v price=%d qty=%d seq=%d",
+		side, otype, req.Price, req.Qty, seq,
+	)
+
+	return &pb.PlaceOrderResponse{
+		Status: "ok",
+		SeqId:  seq,
+	}, nil
 }
 
-func (s *Server) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*pb.CancelOrderResponse, error) {
-	log.Printf("[gRPC] Cancel request: order_id=%d price=%d", req.OrderId, req.Price)
-	return &pb.CancelOrderResponse{Status: "ok"}, nil
+func (s *Server) CancelOrder(
+	ctx context.Context,
+	req *pb.CancelOrderRequest,
+) (*pb.CancelOrderResponse, error) {
+	// Cancellation is not implemented yet in domain.
+	// Keep API stable; implement later.
+	log.Printf(
+		"[gRPC] CancelOrder id=%d price=%d",
+		req.OrderId, req.Price,
+	)
+
+	return &pb.CancelOrderResponse{
+		Status: "ok",
+	}, nil
 }
 
-func (s *Server) GetSnapshot(ctx context.Context, req *pb.SnapshotRequest) (*pb.SnapshotResponse, error) {
+// -------------------- Queries --------------------
+
+func (s *Server) GetSnapshot(
+	ctx context.Context,
+	req *pb.SnapshotRequest,
+) (*pb.SnapshotResponse, error) {
 	orders := s.svc.Snapshot()
-	resp := &pb.SnapshotResponse{}
+
+	resp := &pb.SnapshotResponse{
+		Orders: make([]*pb.OrderEntry, 0, len(orders)),
+	}
+
 	for _, o := range orders {
 		resp.Orders = append(resp.Orders, &pb.OrderEntry{
 			Id:    o.ID,
@@ -45,10 +84,12 @@ func (s *Server) GetSnapshot(ctx context.Context, req *pb.SnapshotRequest) (*pb.
 			Qty:   o.Qty,
 		})
 	}
+
 	return resp, nil
 }
 
-// --- converters ---
+// -------------------- Converters --------------------
+
 func toSide(s pb.Side) orderbook.Side {
 	switch s {
 	case pb.Side_BID:

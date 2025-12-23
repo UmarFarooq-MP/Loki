@@ -6,4 +6,4 @@
 // Snapshotter is intentionally decoupled from order matching,
 // write-ahead logging, and persistence. It only coordinates
 // read visibility using the memory epoch model.
-package snapshotter
+package snapshot

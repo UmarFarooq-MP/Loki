@@ -4,66 +4,156 @@ import (
 	"fmt"
 	"time"
 
-	"loki/memory"
-	"loki/orderbook"
-	"loki/rcu"
-	"loki/wal/entry"
-	"loki/wal/exit"
+	"loki/domain/orderbook"
+	"loki/infra/memory"
+	"loki/infra/wal"
+	"loki/snapshot"
 )
 
+/*
+OrderService is the ONLY write entry point into the system.
+
+All coordination between:
+- domain (orderbook)
+- infra (memory, wal)
+- snapshot
+happens here.
+*/
+
 type OrderService struct {
-	Book     *orderbook.OrderBook
-	Pool     *memory.OrderPool
-	Ring     *memory.RetireRing
-	Reader   *rcu.Reader
-	EntryWAL *entry.WAL
-	ExitWAL  *exit.ExitWAL
+	book   *orderbook.OrderBook
+	pool   *memory.Pool[orderbook.Order]
+	ring   *memory.RetireRing
+	reader *snapshot.Reader
+	wal    *wal.WAL
 }
 
-// NewOrderService constructs the full order service stack.
+// NewOrderService wires all dependencies.
+// No globals. No magic.
 func NewOrderService(
 	book *orderbook.OrderBook,
-	pool *memory.OrderPool,
+	pool *memory.Pool[orderbook.Order],
 	ring *memory.RetireRing,
-	reader *rcu.Reader,
-	entryWAL *entry.WAL,
-	exitWAL *exit.ExitWAL,
+	reader *snapshot.Reader,
+	w *wal.WAL,
 ) *OrderService {
 	return &OrderService{
-		Book:     book,
-		Pool:     pool,
-		Ring:     ring,
-		Reader:   reader,
-		EntryWAL: entryWAL,
-		ExitWAL:  exitWAL,
+		book:   book,
+		pool:   pool,
+		ring:   ring,
+		reader: reader,
+		wal:    w,
 	}
 }
 
-// PlaceOrder handles new incoming orders.
-func (s *OrderService) PlaceOrder(side orderbook.Side, otype orderbook.OrderType, price int64, qty int64, userID uint64) {
+//
+// ──────────────────────────────────────────────────────────
+// Commands
+// ──────────────────────────────────────────────────────────
+//
+
+// PlaceOrder submits a new order into the engine.
+// It returns the assigned sequence number.
+func (s *OrderService) PlaceOrder(
+	side orderbook.Side,
+	otype orderbook.OrderType,
+	price int64,
+	qty int64,
+	userID uint64,
+) uint64 {
 	seq := uint64(time.Now().UnixNano())
 
-	// Log into entry WAL
-	data := fmt.Sprintf("place|%d|%d|%d|%d|%d", userID, side, otype, price, qty)
-	rec := entry.NewRecord(entry.RecordPlace, []byte(data))
-	_ = s.EntryWAL.Append(rec)
-
-	// Process order
-	o := s.Book.PlaceOrder(side, otype, price, qty, userID, seq, s.Pool, s.Ring)
-
-	// Store state in exit WAL
-	state := "ready"
-	if o.Status == orderbook.Inactive {
-		state = "inactive"
+	// 1️⃣ Allocate domain object
+	o := s.pool.Get()
+	*o = orderbook.Order{
+		ID:     userID,
+		Side:   side,
+		Type:   otype,
+		Price:  price,
+		Qty:    qty,
+		Filled: 0,
+		SeqID:  seq,
+		Status: orderbook.Active,
 	}
-	s.ExitWAL.Update(o.ID, state)
+
+	// 2️⃣ Write WAL intent (best-effort for now)
+	_ = s.wal.Append(
+		wal.NewRecord(
+			wal.RecordPlace,
+			[]byte(fmt.Sprintf(
+				"%d|%d|%d|%d|%d",
+				userID,
+				side,
+				otype,
+				price,
+				qty,
+			)),
+		),
+	)
+
+	// 3️⃣ Execute deterministic domain logic
+	s.book.Place(o)
+
+	// 4️⃣ Retire immediately if fully filled
+	if o.Remaining() == 0 {
+		s.retire(o)
+	}
+
+	return seq
 }
 
-// Snapshot returns the current view of the order book.
+//
+// ──────────────────────────────────────────────────────────
+// Queries
+// ──────────────────────────────────────────────────────────
+//
+
+// Snapshot returns a consistent view of all ACTIVE orders.
+// Caller must treat returned orders as read-only.
 func (s *OrderService) Snapshot() []*orderbook.Order {
-	var orders []*orderbook.Order
-	s.Book.SnapshotActiveIter(s.Reader, func(price int64, o *orderbook.Order) {
-		orders = append(orders, o)
+	s.reader.Begin()
+	defer s.reader.End()
+
+	out := make([]*orderbook.Order, 0, 1024)
+
+	// Walk bids (best → worst)
+	s.book.BidsWalk(func(lvl *orderbook.PriceLevel) {
+		for o := lvl.Head(); o != nil; o = o.Next() {
+			if o.Status == orderbook.Active {
+				out = append(out, o)
+			}
+		}
 	})
-	return orders
+
+	// Walk asks (best → worst)
+	s.book.AsksWalk(func(lvl *orderbook.PriceLevel) {
+		for o := lvl.Head(); o != nil; o = o.Next() {
+			if o.Status == orderbook.Active {
+				out = append(out, o)
+			}
+		}
+	})
+
+	return out
+}
+
+//
+// ──────────────────────────────────────────────────────────
+// Reclamation
+// ──────────────────────────────────────────────────────────
+//
+
+// AdvanceEpoch performs safe reclamation.
+// Intended to be called periodically by a background job.
+func (s *OrderService) AdvanceEpoch() {
+	memory.AdvanceEpochAndReclaim(
+		s.ring,
+		s.pool, // satisfies ReclaimablePool via PutAny
+		s.reader.Epoch(),
+	)
+}
+
+func (s *OrderService) retire(o *orderbook.Order) {
+	o.Status = orderbook.Inactive
+	_ = s.ring.Enqueue(o)
 }
