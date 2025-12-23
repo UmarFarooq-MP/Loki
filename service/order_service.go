@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"loki/domain/orderbook"
@@ -14,11 +15,11 @@ import (
 /*
 OrderService — single write entrypoint.
 
-Order of operations (NON-NEGOTIABLE):
+STRICT ORDER (NON-NEGOTIABLE):
 1) seq := Sequencer.Next()
-2) Entry WAL append (with seq)
+2) Entry WAL append (durability)
 3) Execute matching
-4) Exit WAL register
+4) Exit WAL write (outbox)
 5) Respond to client
 */
 
@@ -32,6 +33,8 @@ type OrderService struct {
 	entryWAL *entrywal.WAL
 	exitWAL  *exitwal.ExitWAL
 }
+
+// -------------------- CONSTRUCTOR --------------------
 
 func NewOrderService(
 	book *orderbook.OrderBook,
@@ -55,6 +58,8 @@ func NewOrderService(
 
 // -------------------- COMMAND --------------------
 
+// PlaceOrder is the ONLY mutation entrypoint.
+// It is crash-safe, replay-safe, and outbox-safe.
 func (s *OrderService) PlaceOrder(
 	side orderbook.Side,
 	otype orderbook.OrderType,
@@ -62,7 +67,7 @@ func (s *OrderService) PlaceOrder(
 	qty int64,
 	userID uint64,
 ) uint64 {
-	// 1️⃣ Generate sequence ID
+	// 1️⃣ Generate global sequence ID
 	seq := s.seqGen.Next()
 
 	// 2️⃣ Persist intent (ENTRY WAL)
@@ -81,6 +86,7 @@ func (s *OrderService) PlaceOrder(
 		),
 	)
 	if err != nil {
+		// HARD FAIL: client must retry
 		panic(fmt.Errorf("entry WAL append failed: %w", err))
 	}
 
@@ -98,12 +104,14 @@ func (s *OrderService) PlaceOrder(
 
 	s.book.Place(o)
 
-	// 4️⃣ Register OUTBOX (EXIT WAL)
-	if err := s.exitWAL.PutNew(seq); err != nil {
+	// 4️⃣ Emit outbox event (EXIT WAL)
+	payload := s.buildOrderAcceptedPayload(o)
+	if err := s.exitWAL.PutNew(seq, payload); err != nil {
+		// Non-blocking: broadcaster will retry
 		fmt.Printf("[WARN] exit WAL write failed for seq %d: %v\n", seq, err)
 	}
 
-	// 5️⃣ Retire if filled
+	// 5️⃣ Retire immediately if filled
 	if o.Remaining() == 0 {
 		s.retire(o)
 	}
@@ -138,7 +146,7 @@ func (s *OrderService) Snapshot() []*orderbook.Order {
 	return out
 }
 
-// -------------------- RECLAMATION --------------------
+// -------------------- MEMORY RECLAMATION --------------------
 
 func (s *OrderService) AdvanceEpoch() {
 	memory.AdvanceEpochAndReclaim(
@@ -151,4 +159,24 @@ func (s *OrderService) AdvanceEpoch() {
 func (s *OrderService) retire(o *orderbook.Order) {
 	o.Status = orderbook.Inactive
 	_ = s.ring.Enqueue(o)
+}
+
+// -------------------- PAYLOAD BUILDING --------------------
+
+// buildOrderAcceptedPayload creates an immutable,
+// versioned event for Kafka / downstream consumers.
+func (s *OrderService) buildOrderAcceptedPayload(o *orderbook.Order) []byte {
+	event := map[string]any{
+		"v":     1,
+		"type":  "ORDER_ACCEPTED",
+		"seq":   o.SeqID,
+		"id":    o.ID,
+		"side":  o.Side,
+		"otype": o.Type,
+		"price": o.Price,
+		"qty":   o.Qty,
+	}
+
+	b, _ := json.Marshal(event)
+	return b
 }

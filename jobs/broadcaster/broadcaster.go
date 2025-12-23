@@ -1,78 +1,70 @@
 package broadcaster
 
 import (
-	"context"
 	"log"
 	"time"
 
 	exitwal "loki/infra/wal/exit"
+
+	"github.com/IBM/sarama"
 )
 
-/*
-Broadcaster implements the Outbox Pattern.
-
-It guarantees:
-- eventual delivery
-- retry safety
-- non-blocking matching
-*/
-
 type Broadcaster struct {
-	wal      *exitwal.ExitWAL
-	interval time.Duration
+	exitWAL  *exitwal.ExitWAL
+	producer sarama.SyncProducer
+	topic    string
 }
 
-func New(wal *exitwal.ExitWAL, interval time.Duration) *Broadcaster {
-	return &Broadcaster{
-		wal:      wal,
-		interval: interval,
+func New(
+	exitWAL *exitwal.ExitWAL,
+	brokers []string,
+	topic string,
+) (*Broadcaster, error) {
+
+	cfg := sarama.NewConfig()
+	cfg.Producer.RequiredAcks = sarama.WaitForAll
+	cfg.Producer.Idempotent = true
+	cfg.Producer.Retry.Max = 10
+	cfg.Net.MaxOpenRequests = 1
+	cfg.Producer.Return.Successes = true
+
+	producer, err := sarama.NewSyncProducer(brokers, cfg)
+	if err != nil {
+		return nil, err
 	}
+
+	return &Broadcaster{
+		exitWAL:  exitWAL,
+		producer: producer,
+		topic:    topic,
+	}, nil
 }
 
-func (b *Broadcaster) Run(ctx context.Context) {
-	ticker := time.NewTicker(b.interval)
-	defer ticker.Stop()
-
+func (b *Broadcaster) Run() {
 	log.Println("[broadcaster] started")
 
 	for {
-		select {
-		case <-ctx.Done():
-			log.Println("[broadcaster] stopped")
-			return
-		case <-ticker.C:
-			b.flush()
-		}
+		_ = b.exitWAL.ScanPending(func(rec *exitwal.ExitRecord) error {
+
+			// mark SENT (idempotent)
+			_ = b.exitWAL.MarkSent(rec.Seq)
+
+			msg := &sarama.ProducerMessage{
+				Topic: b.topic,
+				Key:   sarama.StringEncoder(rec.Seq),
+				Value: sarama.ByteEncoder(rec.Payload),
+			}
+
+			_, _, err := b.producer.SendMessage(msg)
+			if err != nil {
+				return nil // retry later
+			}
+
+			// mark ACKED
+			_ = b.exitWAL.MarkAcked(rec.Seq)
+			return nil
+		})
+
+		time.Sleep(5 * time.Millisecond)
 	}
-}
-
-func (b *Broadcaster) flush() {
-	b.process(exitwal.StateNew)
-	b.process(exitwal.StateFailed)
-}
-
-func (b *Broadcaster) process(state exitwal.ExitState) {
-	err := b.wal.ScanByState(state, func(orderID uint64, rec exitwal.ExitRecord) error {
-		return b.send(orderID, rec)
-	})
-	if err != nil {
-		log.Printf("[broadcaster] scan %s failed: %v", state, err)
-	}
-}
-
-func (b *Broadcaster) send(orderID uint64, rec exitwal.ExitRecord) error {
-	log.Printf("[broadcaster] sending order %d (retry=%d)", orderID, rec.Retries)
-
-	// ---- Kafka send goes here ----
-	// Must be idempotent by key=orderID
-
-	success := true // simulate success
-
-	if success {
-		log.Printf("[broadcaster] ACK order %d", orderID)
-		return b.wal.UpdateState(orderID, exitwal.StateAcked, rec.Retries)
-	}
-
-	log.Printf("[broadcaster] FAILED order %d", orderID)
-	return b.wal.UpdateState(orderID, exitwal.StateFailed, rec.Retries+1)
 }

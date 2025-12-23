@@ -1,0 +1,51 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    hostname: kafka
+
+    ports:
+      # Host access
+      - "29092:29092"
+
+    environment:
+      # ======================================================
+      # REQUIRED (KRaft)
+      # ======================================================
+      CLUSTER_ID: u95XqnU7S6mGUB0Jpb9I-w
+
+      # ======================================================
+      # Node / Roles
+      # ======================================================
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # ======================================================
+      # LISTENERS (THIS IS THE KEY FIX)
+      # ======================================================
+      # Internal Docker traffic
+      # External host traffic
+      KAFKA_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://kafka:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+      # ======================================================
+      # Storage
+      # ======================================================
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+      # ======================================================
+      # Single-node safe defaults
+      # ======================================================
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+volumes:
+  kafka_data:
