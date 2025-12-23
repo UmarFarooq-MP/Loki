@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -13,67 +14,94 @@ import (
 
 	"loki/domain/orderbook"
 	"loki/infra/memory"
-	"loki/infra/wal"
+	"loki/infra/sequence"
+	entrywal "loki/infra/wal/entry"
+	exitwal "loki/infra/wal/exit"
+	"loki/jobs/broadcaster"
 	"loki/service"
 	"loki/snapshot"
 )
 
 func main() {
-	// ─────────────────────────────────────────────
-	// Infra: WAL
-	// ─────────────────────────────────────────────
-	w, err := wal.New(wal.Config{
-		Dir:             "./wal",
-		SegmentSize:     2 * 1024 * 1024, // 2MB
+	// ---------------- Entry WAL ----------------
+
+	entryWAL, err := entrywal.Open(entrywal.Config{
+		Dir:             "./wal_entry",
+		SegmentSize:     2 * 1024 * 1024,
 		SegmentDuration: time.Minute,
 	})
 	if err != nil {
-		log.Fatalf("failed to init WAL: %v", err)
+		log.Fatalf("entry WAL init failed: %v", err)
 	}
 
-	// ─────────────────────────────────────────────
-	// Infra: Memory
-	// ─────────────────────────────────────────────
+	// ---------------- Exit WAL ----------------
+
+	exitWAL, err := exitwal.Open("./wal_exit")
+	if err != nil {
+		log.Fatalf("exit WAL init failed: %v", err)
+	}
+	defer exitWAL.Close()
+
+	// ---------------- Sequencer ----------------
+
+	seqGen := sequence.New(0)
+
+	// ---------------- Memory ----------------
+
 	pool := memory.NewPool(func() *orderbook.Order {
 		return &orderbook.Order{}
 	})
-	ring := memory.NewRetireRing(1 << 18) // 256K
+	ring := memory.NewRetireRing(1 << 18)
 	reader := snapshot.NewReader()
 
-	// ─────────────────────────────────────────────
-	// Domain
-	// ─────────────────────────────────────────────
+	// ---------------- Domain ----------------
+
 	book := orderbook.NewOrderBook()
 
-	// ─────────────────────────────────────────────
-	// Service
-	// ─────────────────────────────────────────────
+	// ---------------- WAL REPLAY ----------------
+
+	if err := service.ReplayFromWAL(
+		"./wal_entry",
+		book,
+		pool,
+		seqGen,
+	); err != nil {
+		log.Fatalf("WAL replay failed: %v", err)
+	}
+
+	// ---------------- Service ----------------
+
 	svc := service.NewOrderService(
 		book,
 		pool,
 		ring,
 		reader,
-		w,
+		seqGen,
+		entryWAL,
+		exitWAL,
 	)
 
-	// ─────────────────────────────────────────────
-	// Background: Epoch Reclamation
-	// ─────────────────────────────────────────────
+	// ---------------- Background Jobs ----------------
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
-
 		for range ticker.C {
 			svc.AdvanceEpoch()
 		}
 	}()
 
-	// ─────────────────────────────────────────────
-	// gRPC Server
-	// ─────────────────────────────────────────────
+	bc := broadcaster.New(exitWAL, 2*time.Second)
+	go bc.Run(ctx)
+
+	// ---------------- gRPC ----------------
+
 	lis, err := net.Listen("tcp", ":50051")
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("listen failed: %v", err)
 	}
 
 	grpcSrv := grpc.NewServer()
@@ -82,7 +110,7 @@ func main() {
 		grpcserver.NewServer(svc),
 	)
 
-	fmt.Println("🚀 Loki matching engine running on :50051")
+	fmt.Println("🚀 Loki Engine running on :50051")
 
 	if err := grpcSrv.Serve(lis); err != nil {
 		log.Fatalf("gRPC server exited: %v", err)

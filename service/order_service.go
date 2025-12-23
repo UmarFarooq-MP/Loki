@@ -2,22 +2,24 @@ package service
 
 import (
 	"fmt"
-	"time"
 
 	"loki/domain/orderbook"
 	"loki/infra/memory"
-	"loki/infra/wal"
+	"loki/infra/sequence"
+	entrywal "loki/infra/wal/entry"
+	exitwal "loki/infra/wal/exit"
 	"loki/snapshot"
 )
 
 /*
-OrderService is the ONLY write entry point into the system.
+OrderService — single write entrypoint.
 
-All coordination between:
-- domain (orderbook)
-- infra (memory, wal)
-- snapshot
-happens here.
+Order of operations (NON-NEGOTIABLE):
+1) seq := Sequencer.Next()
+2) Entry WAL append (with seq)
+3) Execute matching
+4) Exit WAL register
+5) Respond to client
 */
 
 type OrderService struct {
@@ -25,35 +27,34 @@ type OrderService struct {
 	pool   *memory.Pool[orderbook.Order]
 	ring   *memory.RetireRing
 	reader *snapshot.Reader
-	wal    *wal.WAL
+
+	seqGen   *sequence.Sequencer
+	entryWAL *entrywal.WAL
+	exitWAL  *exitwal.ExitWAL
 }
 
-// NewOrderService wires all dependencies.
-// No globals. No magic.
 func NewOrderService(
 	book *orderbook.OrderBook,
 	pool *memory.Pool[orderbook.Order],
 	ring *memory.RetireRing,
 	reader *snapshot.Reader,
-	w *wal.WAL,
+	seqGen *sequence.Sequencer,
+	entryWAL *entrywal.WAL,
+	exitWAL *exitwal.ExitWAL,
 ) *OrderService {
 	return &OrderService{
-		book:   book,
-		pool:   pool,
-		ring:   ring,
-		reader: reader,
-		wal:    w,
+		book:     book,
+		pool:     pool,
+		ring:     ring,
+		reader:   reader,
+		seqGen:   seqGen,
+		entryWAL: entryWAL,
+		exitWAL:  exitWAL,
 	}
 }
 
-//
-// ──────────────────────────────────────────────────────────
-// Commands
-// ──────────────────────────────────────────────────────────
-//
+// -------------------- COMMAND --------------------
 
-// PlaceOrder submits a new order into the engine.
-// It returns the assigned sequence number.
 func (s *OrderService) PlaceOrder(
 	side orderbook.Side,
 	otype orderbook.OrderType,
@@ -61,25 +62,14 @@ func (s *OrderService) PlaceOrder(
 	qty int64,
 	userID uint64,
 ) uint64 {
-	seq := uint64(time.Now().UnixNano())
+	// 1️⃣ Generate sequence ID
+	seq := s.seqGen.Next()
 
-	// 1️⃣ Allocate domain object
-	o := s.pool.Get()
-	*o = orderbook.Order{
-		ID:     userID,
-		Side:   side,
-		Type:   otype,
-		Price:  price,
-		Qty:    qty,
-		Filled: 0,
-		SeqID:  seq,
-		Status: orderbook.Active,
-	}
-
-	// 2️⃣ Write WAL intent (best-effort for now)
-	_ = s.wal.Append(
-		wal.NewRecord(
-			wal.RecordPlace,
+	// 2️⃣ Persist intent (ENTRY WAL)
+	err := s.entryWAL.Append(
+		entrywal.NewRecord(
+			entrywal.RecordPlace,
+			seq,
 			[]byte(fmt.Sprintf(
 				"%d|%d|%d|%d|%d",
 				userID,
@@ -90,11 +80,30 @@ func (s *OrderService) PlaceOrder(
 			)),
 		),
 	)
+	if err != nil {
+		panic(fmt.Errorf("entry WAL append failed: %w", err))
+	}
 
-	// 3️⃣ Execute deterministic domain logic
+	// 3️⃣ Execute matching
+	o := s.pool.Get()
+	*o = orderbook.Order{
+		ID:     seq,
+		Side:   side,
+		Type:   otype,
+		Price:  price,
+		Qty:    qty,
+		SeqID:  seq,
+		Status: orderbook.Active,
+	}
+
 	s.book.Place(o)
 
-	// 4️⃣ Retire immediately if fully filled
+	// 4️⃣ Register OUTBOX (EXIT WAL)
+	if err := s.exitWAL.PutNew(seq); err != nil {
+		fmt.Printf("[WARN] exit WAL write failed for seq %d: %v\n", seq, err)
+	}
+
+	// 5️⃣ Retire if filled
 	if o.Remaining() == 0 {
 		s.retire(o)
 	}
@@ -102,21 +111,14 @@ func (s *OrderService) PlaceOrder(
 	return seq
 }
 
-//
-// ──────────────────────────────────────────────────────────
-// Queries
-// ──────────────────────────────────────────────────────────
-//
+// -------------------- QUERY --------------------
 
-// Snapshot returns a consistent view of all ACTIVE orders.
-// Caller must treat returned orders as read-only.
 func (s *OrderService) Snapshot() []*orderbook.Order {
 	s.reader.Begin()
 	defer s.reader.End()
 
 	out := make([]*orderbook.Order, 0, 1024)
 
-	// Walk bids (best → worst)
 	s.book.BidsWalk(func(lvl *orderbook.PriceLevel) {
 		for o := lvl.Head(); o != nil; o = o.Next() {
 			if o.Status == orderbook.Active {
@@ -125,7 +127,6 @@ func (s *OrderService) Snapshot() []*orderbook.Order {
 		}
 	})
 
-	// Walk asks (best → worst)
 	s.book.AsksWalk(func(lvl *orderbook.PriceLevel) {
 		for o := lvl.Head(); o != nil; o = o.Next() {
 			if o.Status == orderbook.Active {
@@ -137,18 +138,12 @@ func (s *OrderService) Snapshot() []*orderbook.Order {
 	return out
 }
 
-//
-// ──────────────────────────────────────────────────────────
-// Reclamation
-// ──────────────────────────────────────────────────────────
-//
+// -------------------- RECLAMATION --------------------
 
-// AdvanceEpoch performs safe reclamation.
-// Intended to be called periodically by a background job.
 func (s *OrderService) AdvanceEpoch() {
 	memory.AdvanceEpochAndReclaim(
 		s.ring,
-		s.pool, // satisfies ReclaimablePool via PutAny
+		s.pool,
 		s.reader.Epoch(),
 	)
 }

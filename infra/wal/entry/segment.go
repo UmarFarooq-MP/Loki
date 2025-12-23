@@ -1,16 +1,14 @@
-package wal
+package entry
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 type segment struct {
 	file   *os.File
 	offset int64
-	start  time.Time
 }
 
 func openSegment(dir string, index int) (*segment, error) {
@@ -19,11 +17,11 @@ func openSegment(dir string, index int) (*segment, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &segment{file: f, start: time.Now()}, nil
+	return &segment{file: f}, nil
 }
 
-func (s *segment) append(data []byte) error {
-	n, err := s.file.Write(data)
+func (s *segment) append(b []byte) error {
+	n, err := s.file.Write(b)
 	if err != nil {
 		return err
 	}
