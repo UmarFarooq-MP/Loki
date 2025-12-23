@@ -3,6 +3,7 @@ package entry
 import (
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -75,5 +76,23 @@ func (w *WAL) rotate() error {
 
 	w.current = seg
 	w.lastRotate = time.Now()
+	return nil
+}
+
+func (w *WAL) TruncateBefore(seq uint64) error {
+	files, err := filepath.Glob(filepath.Join(w.dir, "segment-*.wal"))
+	if err != nil {
+		return err
+	}
+
+	for _, path := range files {
+		maxSeq, err := maxSeqInSegment(path)
+		if err != nil {
+			continue
+		}
+		if maxSeq <= seq {
+			_ = os.Remove(path)
+		}
+	}
 	return nil
 }
