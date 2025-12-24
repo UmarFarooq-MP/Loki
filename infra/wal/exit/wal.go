@@ -27,6 +27,10 @@ type ExitWAL struct {
 	db *pebble.DB
 }
 
+// ---------------------------------------------------
+// OPEN / CLOSE
+// ---------------------------------------------------
+
 func Open(path string) (*ExitWAL, error) {
 	db, err := pebble.Open(path, &pebble.Options{})
 	if err != nil {
@@ -43,9 +47,9 @@ func key(seq uint64) []byte {
 	return []byte(fmt.Sprintf("exit/%020d", seq))
 }
 
-// =====================================================
+// ===================================================
 // WRITE PATH
-// =====================================================
+// ===================================================
 
 func (w *ExitWAL) PutNew(seq uint64, payload []byte) error {
 	rec := ExitRecord{
@@ -87,9 +91,9 @@ func (w *ExitWAL) updateState(seq uint64, st ExitState) error {
 	return w.db.Set(k, data, pebble.Sync)
 }
 
-// =====================================================
-// SCAN
-// =====================================================
+// ===================================================
+// SCAN (NEW + SENT only)
+// ===================================================
 
 func (w *ExitWAL) ScanPending(fn func(*ExitRecord) error) error {
 	iter, err := w.db.NewIter(&pebble.IterOptions{
@@ -106,7 +110,8 @@ func (w *ExitWAL) ScanPending(fn func(*ExitRecord) error) error {
 		if err := json.Unmarshal(iter.Value(), &rec); err != nil {
 			continue
 		}
-		if rec.State != ExitAcked {
+
+		if rec.State == ExitNew || rec.State == ExitSent {
 			if err := fn(&rec); err != nil {
 				return err
 			}
@@ -115,9 +120,9 @@ func (w *ExitWAL) ScanPending(fn func(*ExitRecord) error) error {
 	return nil
 }
 
-// =====================================================
-// TRUNCATION
-// =====================================================
+// ===================================================
+// TRUNCATION (GC)
+// ===================================================
 
 func (w *ExitWAL) TruncateAckedUpTo(seq uint64) error {
 	batch := w.db.NewBatch()

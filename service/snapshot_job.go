@@ -18,12 +18,17 @@ func (s *OrderService) StartSnapshotJob(
 
 		for range t.C {
 			seq := s.seqGen.Current()
+
+			// Write snapshot
 			if err := w.Write(seq, s.book); err != nil {
 				continue
 			}
 
-			// truncate WAL AFTER snapshot
+			// Truncate ENTRY WAL after snapshot
 			_ = s.entryWAL.TruncateBefore(seq)
+
+			// GC EXIT WAL (acked only)
+			_ = s.exitWAL.TruncateAckedUpTo(seq)
 		}
 	}()
 }
