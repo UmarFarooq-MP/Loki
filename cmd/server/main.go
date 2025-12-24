@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net"
 	"os"
@@ -111,7 +112,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("broadcaster init failed: %v", err)
 	}
-	go b.Run()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.Start(ctx)
 
 	// -----------------------------
 	// gRPC server

@@ -1,6 +1,8 @@
 package broadcaster
 
 import (
+	"context"
+	_ "encoding/json"
 	"log"
 	"time"
 
@@ -15,6 +17,17 @@ type Broadcaster struct {
 	topic    string
 }
 
+type Event struct {
+	V    int    `json:"v"`
+	Type string `json:"type"`
+	ID   uint64 `json:"id"`
+	Seq  uint64 `json:"seq"`
+}
+
+// ------------------------------------------------
+// CONSTRUCTOR
+// ------------------------------------------------
+
 func New(
 	exitWAL *exitwal.ExitWAL,
 	brokers []string,
@@ -22,11 +35,9 @@ func New(
 ) (*Broadcaster, error) {
 
 	cfg := sarama.NewConfig()
-	cfg.Producer.RequiredAcks = sarama.WaitForAll
-	cfg.Producer.Idempotent = true
-	cfg.Producer.Retry.Max = 10
-	cfg.Net.MaxOpenRequests = 1
 	cfg.Producer.Return.Successes = true
+	cfg.Producer.RequiredAcks = sarama.WaitForAll
+	cfg.Producer.Retry.Max = 5
 
 	producer, err := sarama.NewSyncProducer(brokers, cfg)
 	if err != nil {
@@ -40,31 +51,61 @@ func New(
 	}, nil
 }
 
-func (b *Broadcaster) Run() {
+// ------------------------------------------------
+// START LOOP
+// ------------------------------------------------
+
+func (b *Broadcaster) Start(ctx context.Context) {
 	log.Println("[broadcaster] started")
 
-	for {
-		_ = b.exitWAL.ScanPending(func(rec *exitwal.ExitRecord) error {
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
 
-			// mark SENT (idempotent)
-			_ = b.exitWAL.MarkSent(rec.Seq)
+		for {
+			select {
+			case <-ctx.Done():
+				return
 
-			msg := &sarama.ProducerMessage{
-				Topic: b.topic,
-				Key:   sarama.StringEncoder(rec.Seq),
-				Value: sarama.ByteEncoder(rec.Payload),
+			case <-ticker.C:
+				b.replayOnce()
 			}
+		}
+	}()
+}
 
-			_, _, err := b.producer.SendMessage(msg)
-			if err != nil {
-				return nil // retry later
-			}
+// ------------------------------------------------
+// REPLAY LOGIC (CRITICAL)
+// ------------------------------------------------
 
-			// mark ACKED
-			_ = b.exitWAL.MarkAcked(rec.Seq)
-			return nil
-		})
+func (b *Broadcaster) replayOnce() {
+	_ = b.exitWAL.ScanPending(func(rec *exitwal.ExitRecord) error {
 
-		time.Sleep(5 * time.Millisecond)
-	}
+		// 1️⃣ Mark SENT (idempotent)
+		_ = b.exitWAL.MarkSent(rec.Seq)
+
+		// 2️⃣ Publish to Kafka
+		msg := &sarama.ProducerMessage{
+			Topic: b.topic,
+			Value: sarama.ByteEncoder(rec.Payload),
+		}
+
+		_, _, err := b.producer.SendMessage(msg)
+		if err != nil {
+			return nil // retry later
+		}
+
+		// 3️⃣ Mark ACKED
+		_ = b.exitWAL.MarkAcked(rec.Seq)
+
+		return nil
+	})
+}
+
+// ------------------------------------------------
+// SHUTDOWN
+// ------------------------------------------------
+
+func (b *Broadcaster) Close() error {
+	return b.producer.Close()
 }
